@@ -127,7 +127,7 @@ class Sheet:
         # else:
         #     thread.join()
             
-    def add_row(self, rows:list[list]) -> None:
+    def add_row(self, rows:list) -> None:
         """Add one or more rows to the sheet.
 
         :param list rows: The list of the row(s) to add to the sheet.

@@ -155,6 +155,7 @@ class Strategy(StrategyTester, IndicatorsParallel):
         """
         strategy.current_candle = row.name
         strategy.trade_calc(row)
+        strategy.asset_changes.append([row.date, strategy.whole_asset])
         
     def trade_calc(strategy, row):
         """Check terms and open/close positions.

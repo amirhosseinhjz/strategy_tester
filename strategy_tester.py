@@ -8,7 +8,7 @@ import re
 from strategy_tester.sheet import Sheet
 from strategy_tester.encoder import NpEncoder
 from threading import Thread
-
+import copy
 
 class StrategyTester:
     """ 
@@ -54,6 +54,7 @@ class StrategyTester:
     def set_init(strategy):
         strategy._cash = 10000
         strategy._initial_capital = 10000
+        strategy._contract = 0
         strategy.long = "long"
         strategy.short = "short"
 
@@ -66,8 +67,22 @@ class StrategyTester:
         strategy.closed_positions = []
         strategy.links_results = {}
         strategy.threads_sheet = []
-        strategy.cash_series = pd.Series(dtype=float)
+        # strategy.cash_series = pd.Series(dtype=float, name="cash")
+        strategy.asset_changes = []
+
+    @property
+    def whole_asset(strategy):
+        """Calculate the moment wallet value of the strategy.
         
+        Returns
+        -------
+        float
+            The moment wallet value of the strategy.
+        """
+        current_price = strategy._current_candle_calc().close
+        value = strategy._cash + strategy._contract * current_price
+        return value
+
     @property
     def cash(strategy):
         return strategy._cash
@@ -122,16 +137,23 @@ class StrategyTester:
         """
         # TODO: add limit and stop
 
-        if strategy._cash > 0:
-            strategy._commission_calc(qty)
-            current_candle = strategy._current_candle_calc()
-            trade = Trade(type=direction,
-                          entry_date=current_candle.close_time, # Because close time a few mili seconds before the next candle
-                          entry_price=current_candle.close,
-                          entry_signal=signal,
-                          contract=strategy._contract_calc(qty),
-                          comment=comment)
-            strategy.open_positions.append(trade)
+        if strategy._cash <= 0:
+            return
+        # trade = list(filter(lambda trade: trade.entry_signal == signal, strategy.open_positions))
+        trade = next((trade for trade in strategy.open_positions if trade.entry_signal == signal), None)
+        if trade:
+            strategy._update_trade(trade, qty)
+            return trade
+        strategy._commission_calc(qty)
+        current_candle = strategy._current_candle_calc()
+        trade = Trade(type=direction,
+                        entry_date=current_candle.close_time, # Because close time a few mili seconds before the next candle
+                        entry_price=current_candle.close,
+                        entry_signal=signal,
+                        contract=strategy._contract_calc(qty),
+                        comment=comment)
+        strategy.open_positions.append(trade)
+        return trade
 
     def exit(strategy,
              from_entry: str,
@@ -164,6 +186,13 @@ class StrategyTester:
             trade = next((trade for trade in strategy.open_positions
                           if trade.entry_signal == from_entry), None)
             if trade and strategy.current_candle < strategy.last_candle:
+                if qty != 1:
+                    contract = trade.contract
+                    trade.contract = qty * contract
+                    strategy._contract -= trade.contract
+                    trade_still_open = copy.deepcopy(trade)
+                    trade_still_open.contract = (1 - qty) * contract
+                    strategy.open_positions.append(trade_still_open)
                 current_candle = strategy._current_candle_calc()
                 # Calculate parameters such as profit, draw down, etc.
                 data_trade = strategy.data.loc[strategy.data.date.between(
@@ -176,8 +205,10 @@ class StrategyTester:
                     strategy._cash_calc(trade)
                     strategy.closed_positions.append(trade)
                     strategy.open_positions.remove(trade)
-                    strategy.cash_series = pd.concat(
-                        [strategy.cash_series, pd.Series(data=strategy._cash, index=[current_candle.close_time])])
+                    strategy._contract -= trade.contract
+                    # strategy.cash_series = pd.concat(
+                    #     [strategy.cash_series, pd.Series(data=strategy._cash, index=[current_candle.close_time])])
+                    return trade
                     
     def _set_data(strategy, data: DataHandler = None):
         """Convert the data to DataHandler object and set the data to the StrategyTester.
@@ -200,6 +231,22 @@ class StrategyTester:
         strategy.close = data.close
         strategy.volume = data.volume
         strategy.last_candle = data.date.iloc[-1]
+
+    def _update_trade(strategy, trade, qty: float):
+        """Update the avg entry price of a trade.
+        
+        Parameters
+        ----------
+        trade: Trade
+            The trade that you want to update the entry price of.
+        new_contract: float
+            The new contract of the trade.
+        """
+        current_candle = strategy._current_candle_calc()
+        contract = strategy._contract_calc(qty)
+        trade.entry_price = ((trade.entry_price * trade.contract + contract * current_candle.close)
+                         / (trade.contract + contract))
+        trade.contract += contract
 
     @staticmethod
     def _set_commission(commission: float):
@@ -259,6 +306,7 @@ class StrategyTester:
         current_candle = strategy._current_candle_calc()
         contract = (qty * strategy._cash) / current_candle.close
         # Subtract the contract from the cash
+        strategy._contract += contract
         strategy._cash -= qty * strategy._cash
         return contract
 
@@ -387,5 +435,6 @@ class StrategyTester:
         return results_objs
 
     def plot_initial_capital(strategy):
-        strategy.cash_series.index = pd.to_datetime(strategy.cash_series.index, unit="ms")
-        strategy.cash_series.plot(label="Initial Capital Chart")
+        asset_series = pd.DataFrame(strategy.asset_changes, columns=["date", "asset"])
+        asset_series.index = pd.to_datetime(asset_series.date, unit="ms").round("1s")
+        asset_series.asset.plot()
